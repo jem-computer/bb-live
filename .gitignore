@@ -1,0 +1,26 @@
+dist/
+node_modules/
+
+# Local verification captures can contain workspace names and transcripts.
+artifacts/
+coverage/
+*.log
+.DS_Store
+
+# Credentials and local runtime state never belong in the plugin source.
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.bb/
+secrets/

@@ -1,0 +1,52 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install --global bb-app@0.43.1
+      - run: npm run check
+      - name: Build with only Git-install dependencies
+        shell: bash
+        run: |
+          checkout_dir=$(mktemp -d)
+          trap 'rm -rf "$checkout_dir"' EXIT
+          git archive HEAD | tar -x -C "$checkout_dir"
+          cd "$checkout_dir"
+          npm ci --omit=dev --omit=optional
+          bb plugin build
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Gitleaks 8.30.1
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan checkout and all Git refs
+        run: |
+          "$RUNNER_TEMP/gitleaks" dir . --redact=100 --no-banner
+          "$RUNNER_TEMP/gitleaks" git . --log-opts=--all --redact=100 --no-banner
