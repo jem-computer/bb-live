@@ -80,8 +80,8 @@ async function fixture(retention = 30) {
         ],
         get: async ({ projectId }) => ({
           id: projectId,
-          name: "Personal",
-          kind: "personal",
+          name: projectId === "personal" ? "Personal" : "Project",
+          kind: projectId === "personal" ? "personal" : "standard",
         }),
       },
       threads: {
@@ -570,6 +570,301 @@ test("thread IDs in agent output are replaced before reaching spoken commentary"
       .join(" ");
     assert.match(commentary, /Finished/);
     assert.doesNotMatch(commentary, /thr_private123|proj_private456/);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("thread capability questions answer without dispatching work", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    await f.event({
+      action: "capabilities",
+      target: null,
+      message: "Can I start a brand new thread directly from BB Live?",
+      uncertain: false,
+    });
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.spawn").length, 1); // Operator initialization only
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.send").length, 0);
+    assert.ok(
+      f.sent.some((e) =>
+        String(e.content).includes("create new threads in the right projects"),
+      ),
+    );
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("new voice task spawns once in the resolved project and tracks its real outcome", async () => {
+  const f = await fixture();
+  try {
+    const session = await f.start();
+    let worker = makeThreadResponse({
+      id: "new-worker",
+      projectId: "project",
+      title: "Fix search",
+      status: "pending",
+    });
+    f.harness.sdk.stub("projects.get", async () => ({
+      id: "project",
+      name: "Project",
+      kind: "standard",
+    }));
+    f.harness.sdk.stub("threads.spawn", async () => worker);
+    f.harness.sdk.stub("threads.get", async ({ threadId }) =>
+      threadId === worker.id ? worker : f.operator,
+    );
+    await f.event({
+      action: "spawn",
+      target: "project",
+      message: "Fix search\nPreserve keyboard navigation and verify it.",
+      uncertain: false,
+    });
+    f.onEvent({
+      type: "session.delegation.created",
+      offset_ms: 110,
+      delegation: { id: "d1", target: "client" },
+    });
+    const spawn = f.harness.inspection.sdk.callsTo("threads.spawn").at(-1)!;
+    assert.ok(JSON.stringify(spawn).includes('"projectId":"project"'));
+    assert.ok(
+      JSON.stringify(spawn).includes(
+        '"environment":{"type":"project-default"}',
+      ),
+    );
+    assert.ok(JSON.stringify(spawn).includes('"visibility":"visible"'));
+    assert.ok(
+      JSON.stringify(spawn).includes('"permissionMode":"accept-edits"'),
+    );
+    assert.ok(JSON.stringify(spawn).includes("Preserve keyboard navigation"));
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.spawn").length, 2);
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.send").length, 0); // spawn carries the prompt, never send twice
+    assert.deepEqual(
+      f.db
+        .prepare("SELECT target_id,status FROM delegations WHERE id='d1'")
+        .get(),
+      { target_id: "new-worker", status: "working" },
+    );
+    await f.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: worker,
+      lastAssistantText: null,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT status FROM delegations WHERE id='d1'")
+          .get() as any
+      ).status,
+      "working",
+    );
+    worker = { ...worker, status: "idle", updatedAt: Date.now() + 1 };
+    await f.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: worker,
+      lastAssistantText: null,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT status FROM delegations WHERE id='d1'")
+          .get() as any
+      ).status,
+      "completed",
+    );
+    const snapshot = await f.call("snapshot", {
+      id: session.id,
+      token: session.token,
+    });
+    assert.ok(
+      snapshot.events.some(
+        (e: any) => e.kind === "delegation" && e.threadId === worker.id,
+      ),
+    );
+    assert.ok(
+      f.sent.some((e) => String(e.content).includes("BB reports pending")),
+    );
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("spawn needs an unambiguous project, task, and safe request", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    for (const [i, intent] of [
+      {
+        action: "spawn",
+        target: null,
+        message: "Fix search",
+        uncertain: false,
+      },
+      {
+        action: "spawn",
+        target: "missing-project",
+        message: "Fix search",
+        uncertain: false,
+      },
+      { action: "spawn", target: "project", message: "", uncertain: false },
+      {
+        action: "spawn",
+        target: "project",
+        message: "deploy the website",
+        uncertain: false,
+      },
+      {
+        action: "spawn",
+        target: "project",
+        message: "Fix search",
+        uncertain: true,
+      },
+    ].entries())
+      await f.event(intent as Intent, `blocked-${i}`);
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.spawn").length, 1);
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.send").length, 0);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("this project resolves from explicit thread focus without using the Operator environment", async () => {
+  const f = await fixture();
+  try {
+    const session = await f.start();
+    await f.call("focus", {
+      id: session.id,
+      token: session.token,
+      kind: "thread",
+      target: "worker",
+      explicit: true,
+    });
+    f.harness.sdk.stub("projects.get", async ({ projectId }) => ({
+      id: projectId,
+      name: "Project",
+      kind: "standard",
+    }));
+    await f.event({
+      action: "spawn",
+      target: null,
+      message: "Investigate search",
+      uncertain: false,
+    });
+    const spawn = JSON.stringify(
+      f.harness.inspection.sdk.callsTo("threads.spawn").at(-1),
+    );
+    assert.match(spawn, /"projectId":"project"/);
+    assert.match(spawn, /"type":"project-default"/);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("ambiguous project names never create a thread", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    f.harness.sdk.stub("projects.list", async () => [
+      { id: "one", name: "Website", kind: "standard" },
+      { id: "two", name: "Website", kind: "standard" },
+    ]);
+    await f.event({
+      action: "spawn",
+      target: "Website",
+      message: "Fix search",
+      uncertain: false,
+    });
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.spawn").length, 1);
+    assert.ok(f.sent.some((e) => String(e.content).includes("Which project")));
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("spawn failure is not retried or reported as success", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    f.harness.sdk.stub("threads.spawn", async () => {
+      throw new Error("network failure after accept");
+    });
+    await f.event({
+      action: "spawn",
+      target: "project",
+      message: "Fix search",
+      uncertain: false,
+    });
+    f.onEvent({
+      type: "session.delegation.created",
+      offset_ms: 110,
+      delegation: { id: "d1", target: "client" },
+    });
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.spawn").length, 2);
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT status FROM delegations WHERE id='d1'")
+          .get() as any
+      ).status,
+      "failed",
+    );
+    assert.ok(!f.sent.some((e) => String(e.content).includes("Created")));
+    assert.ok(
+      f.sent.some((e) =>
+        String(e.content).includes("may already have been accepted"),
+      ),
+    );
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("a multi-project voice dump reaches the Operator with all tasks and a directory", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    const message =
+      "Continue the Release thread in Project with keyboard checks. Start a separate BB Live task to investigate voice routing, keeping the UI unchanged.";
+    await f.event({
+      action: "operator",
+      target: null,
+      message,
+      uncertain: false,
+    });
+    const sends = f.harness.inspection.sdk.callsTo("threads.send");
+    assert.equal(sends.length, 1);
+    const dispatch = JSON.stringify(sends[0]);
+    assert.ok(dispatch.includes(message));
+    assert.ok(dispatch.includes("Workspace directory"));
+    assert.ok(dispatch.includes("existing project threads"));
+    assert.ok(dispatch.includes("bb thread spawn --project"));
+    assert.ok(dispatch.includes('"threadId":"operator"'));
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("project-level follow-up investigates ownership instead of demanding thread selection", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    await f.event({
+      action: "send",
+      target: "project",
+      message: "Investigate search in Project",
+      uncertain: false,
+    });
+    assert.equal(f.harness.inspection.sdk.callsTo("threads.send").length, 1);
+    assert.ok(
+      JSON.stringify(
+        f.harness.inspection.sdk.callsTo("threads.send")[0],
+      ).includes('"threadId":"operator"'),
+    );
+    assert.ok(
+      !f.sent.some((e) => String(e.content).includes("name or select")),
+    );
   } finally {
     await f.harness.lifecycle.dispose();
   }

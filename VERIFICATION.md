@@ -1,6 +1,6 @@
 # BB Live verification — 2026-09-16
 
-Implementation level: **wired for real reads and writes; not end-to-end verified with GPT-Live**. The repository is an installed BB plugin, not a standalone mockup. No MVP-complete claim is made.
+Implementation level: **real reads and writes, with direct voice-to-project-thread creation verified end to end; broader voice and Operator acceptance remains incomplete**. The repository is an installed BB plugin, not a standalone mockup. No MVP-complete claim is made.
 
 ## Implemented
 
@@ -39,9 +39,9 @@ Browser checks at 1280px desktop, 390px and 320px mobile widths confirmed contai
 
 ## Remaining acceptance work
 
-Real SDP exchange, sideband event ordering, intent-model access, audible full duplex/barge-in, spoken direct reads and mutations, result injection, and actual iPhone Safari microphone/autoplay/network behavior remain unverified.
+Real SDP exchange, intent-model access, direct thread creation and result injection were verified with generated speech in the routing check below. Audible full duplex/barge-in, broader sideband event ordering, all mutation modes, and actual iPhone Safari microphone/autoplay/network behavior remain unverified.
 
-The Operator-to-project-worker flow is wired but has not executed through a completed live request. Its initialization remains subject to BB's existing concurrency limit. A real voice session ending while a delegated BB task continues, reload during real media, and live secret-leakage inspection remain pending.
+The Operator-to-project-worker flow is wired but has not executed through a completed live request. Its execution remains subject to BB's existing concurrency limit and provider approval controls. A real voice session ending while a delegated BB task continues, reload during real media, and live secret-leakage inspection remain pending.
 
 ## Deliberate first-release limits
 
@@ -80,3 +80,16 @@ Jem also reported a successful real spoken session before this change. Remaining
 Implemented and browser-verified: the managed sidebar-footer disclosure owns status, start/cancel, mute, sound, stop-talking, end, hold-to-talk, attention links, errors, and an inline transcript/focus view. The app-overlay registration now renders only the headless controller. No fixed voice bar or floating transcript remains. A custom footer microphone marks active sessions and attention, including while collapsed.
 
 The original 28 tests, typecheck, SDK pin check, and build passed after the UI change. In the installed BB app, browser-only fake media/RPC responses verified independent mute/silence, hold-to-talk release on collapse, no end call on collapse, connection survival across thread navigation and mobile sidebar remounts, transcript Escape dismissal, speech interruption, and exactly one end call with stopped tracks/closed peer/no audio elements. Desktop and 390 × 844 footer panels had no horizontal overflow; mobile primary controls were at least 61 × 49 pixels and hold-to-talk was 44 pixels tall. Permission denial stayed inside the footer with retry available. Browser overrides were removed by reload. This check did not open a microphone or call OpenAI; physical iPhone Safari remains unverified.
+
+
+## Voice routing and new threads — 2026-09-16
+
+Fixed the observed capability refusal: the recorded session had turned “Can I start a brand new thread directly from BB Live?” into a clarification, then answered “Not yet.” Live and the intent router now explicitly advertise thread creation; capability questions do not create work. Added a typed `spawn` intent that resolves a project against live BB state, uses its environment/execution defaults with `accept-edits`, creates a visible thread with the task in the initial prompt, persists its delegation, and tracks actual status/output. Duplicate delegation events never resend or respawn. Missing/ambiguous projects and empty tasks ask a focused question.
+
+Multi-topic dumps and uncertain ownership route the full request and workspace directory to the Operator, with explicit instructions to inspect conversations, reuse owners, and create project-specific children as needed. Project-level follow-ups no longer fail by demanding manual thread selection. This path is implemented, but completed multi-project dispatch is not yet verified: the installed Operator provider requested normal command approval during discovery.
+
+All 36 tests, typecheck, SDK pin validation and plugin build passed. Eight new server regressions cover capability-only requests, project/default-environment creation, real-state outcome tracking, duplicate events, explicit focus, missing/ambiguous projects, unsafe requests, uncertain spawn failures, multi-topic handoff, and project-level discovery. A subsequent build briefly hit host disk exhaustion; rerunning the build succeeded. No build was reloaded during the user's voice session.
+
+Live browser verification used generated speech through a synthetic audio stream, the real WebRTC/GPT-Live connection, the configured intent model and real BB SDK writes. The capability question received “Yep” without task creation. An explicit read-only task created a real visible thread in `bb-live`, using the project's configured worktree, which read `package.json` and returned `bb-plugin-bb-live`; the result reached the voice transcript. A second spoken request preserved both tasks (an existing-thread follow-up and new work in `bb-project-page`) in the Operator handoff. The Operator paused at a command approval before dispatch; that read-only test turn was stopped and its interaction cleared. The voice test ended, media tracks and browser were closed, and `active: null` was verified so the user could start Live. No real microphone was captured.
+
+Remaining: completed Operator-to-existing/new-thread routing under the user's chosen provider and normal approval controls, physical iPhone audio, and human conversational acceptance. No unattended cross-project completion claim is made.

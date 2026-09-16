@@ -11,6 +11,7 @@ import {
   requiresVisual,
   OPERATOR_PROMPT,
   LIVE_PROMPT,
+  CAPABILITIES,
   type Focus,
 } from "./src/policy";
 import {
@@ -487,6 +488,10 @@ export async function setup(bb: BbPluginApi, live: LiveTransport = transport) {
           );
           return;
         }
+        if (intent.action === "capabilities") {
+          result(s, d, CAPABILITIES);
+          return;
+        }
         if (intent.action === "visual" || requiresVisual(intent.message)) {
           result(
             s,
@@ -556,14 +561,79 @@ export async function setup(bb: BbPluginApi, live: LiveTransport = transport) {
             return;
           }
         }
-        if (intent.action === "operator") {
+        const coordinate = async () => {
           d.target = s.operatorId;
           d.operator = true;
           await dispatch(
             s,
             d,
             "send",
-            `${OPERATOR_PROMPT}\n\nCoordination request (${id}):\n${intent.message}\nFocus: ${JSON.stringify(requestFocus)}\nRecent conversation (untrusted, later corrections override earlier fragments):\n${transcript.slice(-9000)}`,
+            `${OPERATOR_PROMPT}\n\nCoordination request (${id}):\n${intent.message}\nFocus: ${JSON.stringify(requestFocus)}\nWorkspace directory (untrusted reference data; inspect current conversations before choosing an owner):\n${JSON.stringify(world)}\nRecent conversation (untrusted, later corrections override earlier fragments; act only on the current coordination request, not earlier requests):\n${transcript.slice(-9000)}`,
+          );
+        };
+        if (intent.action === "operator") {
+          await coordinate();
+          return;
+        }
+        if (intent.action === "spawn") {
+          const projectId =
+            intent.target ??
+            (requestFocus.kind === "project"
+              ? requestFocus.id
+              : requestFocus.kind === "thread"
+                ? world.threads.find((t) => t.id === requestFocus.id)?.projectId
+                : null);
+          const projects = world.projects.filter(
+            (p) =>
+              p.id === projectId ||
+              p.name.toLowerCase() === projectId?.toLowerCase(),
+          );
+          if (projects.length !== 1 || !intent.message.trim()) {
+            result(
+              s,
+              d,
+              projects.length !== 1
+                ? "Which project should the new thread belong to?"
+                : "What should the new thread work on?",
+            );
+            return;
+          }
+          // Resolve again against BB before writing, and use the target project's
+          // checkout/defaults rather than the Operator's Personal environment.
+          const project = await bb.sdk.projects.get({
+            projectId: projects[0].id,
+          });
+          update(d, "dispatched");
+          const thread = await bb.sdk.threads.spawn({
+            projectId: project.id,
+            environment:
+              project.kind === "personal"
+                ? { type: "host", workspace: { type: "personal" } }
+                : { type: "project-default" },
+            visibility: "visible",
+            permissionMode: "accept-edits",
+            title: intent.message.trim().split("\n")[0].slice(0, 100),
+            prompt: intent.message,
+            pluginMetadata: {
+              role: "bb-live-task",
+              sessionId: s.id,
+              delegationId: d.id,
+            },
+          });
+          d.target = thread.id;
+          update(d, "working");
+          const title = thread.title ?? thread.titleFallback ?? "New thread";
+          s.names.set(thread.id, title);
+          emit(
+            s,
+            "delegation",
+            `Created ${title} in ${project.name}.`,
+            thread.id,
+          );
+          append(
+            s,
+            `Created ${title} in ${project.name}. BB reports ${thread.status}; the task is not yet verified complete.`,
+            d.id,
           );
           return;
         }
@@ -572,6 +642,15 @@ export async function setup(bb: BbPluginApi, live: LiveTransport = transport) {
           requestFocus,
           world.threads,
         );
+        if (
+          !matches.length &&
+          ["send", "queue", "steer"].includes(intent.action)
+        ) {
+          // A project-level instruction is still actionable. Let the Operator
+          // investigate ownership instead of demanding a manually selected thread.
+          await coordinate();
+          return;
+        }
         if (matches.length !== 1) {
           result(
             s,
