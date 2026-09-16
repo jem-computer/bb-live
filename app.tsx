@@ -20,7 +20,8 @@ function SettingsLink() {
         }
       }}
     >
-      Settings <span aria-hidden="true">↗</span>
+      Settings
+      <Icon name="ArrowUpRight" style={{ width: 14, height: 14 }} />
     </a>
   );
 }
@@ -47,6 +48,7 @@ function Controls() {
     <div className="bl-controls">
       <button
         aria-label={s.muted ? "Unmute microphone" : "Mute microphone"}
+        title={s.muted ? "Unmute microphone" : "Mute microphone"}
         aria-pressed={s.muted}
         onClick={live.mute}
       >
@@ -81,6 +83,7 @@ function Controls() {
       )}
       <button
         aria-label={s.silenced ? "Unsilence BB Live" : "Silence BB Live"}
+        title={s.silenced ? "Turn BB's voice back on" : "Silence BB's voice"}
         aria-pressed={s.silenced}
         onClick={live.silence}
       >
@@ -90,20 +93,28 @@ function Controls() {
         />
         <span>{s.silenced ? "Sound on" : "Silence"}</span>
       </button>
-      <button aria-label="Stop talking" onClick={() => void live.interrupt()}>
-        <Icon name="Square" style={{ width: 17, height: 17 }} />
-        <span>Stop talking</span>
+      <button
+        aria-label="Stop talking"
+        title="Interrupt BB"
+        onClick={() => void live.interrupt()}
+      >
+        <Icon name="Square" style={{ width: 16, height: 16 }} />
+        <span>Interrupt</span>
       </button>
       <button
         aria-label="Open transcript and details"
+        title="Transcript and focus"
         aria-expanded={s.details}
+        aria-pressed={s.details}
         onClick={() => live.details()}
       >
         <Icon name="MessageSquare" style={{ width: 20, height: 20 }} />
-        <span>Details</span>
+        <span>Transcript</span>
       </button>
+      <span className="bl-divider" aria-hidden="true" />
       <button
         className="bl-end"
+        title="End voice session"
         aria-label="End voice session"
         onClick={() => void live.end()}
       >
@@ -113,11 +124,26 @@ function Controls() {
     </div>
   );
 }
-function Wave({ active = false }: { active?: boolean }) {
+function Wave() {
+  const s = useLive();
+  const mode = !s.auth
+    ? "idle"
+    : s.status === "speaking"
+      ? "speaking"
+      : s.muted && !s.ptt
+        ? "muted"
+        : "listening";
   return (
-    <div className={"bl-wave " + (active ? "is-live" : "")} aria-hidden="true">
+    <div className="bl-wave" data-mode={mode} aria-hidden="true">
       {[12, 26, 40, 20, 54, 34, 64, 44, 28, 48, 20, 34, 12].map((height, i) => (
-        <i key={i} style={{ height, animationDelay: `${i * 0.09}s` }} />
+        <i
+          key={i}
+          style={{
+            height,
+            animationDelay: `${(i % 5) * 0.11}s`,
+            animationDuration: `${0.9 + (i % 3) * 0.2}s`,
+          }}
+        />
       ))}
     </div>
   );
@@ -134,9 +160,21 @@ function Status() {
     reconnecting: "Reconnecting",
     error: "Connection needs attention",
   };
+  const tone =
+    s.status === "speaking"
+      ? "speaking"
+      : s.status === "listening"
+        ? s.muted && !s.ptt
+          ? "muted"
+          : "listening"
+        : ["reconnecting", "error"].includes(s.status)
+          ? "warn"
+          : s.status === "connecting"
+            ? "busy"
+            : "";
   return (
-    <span className="bl-status" role="status">
-      <i className={s.auth ? "on" : ""} />
+    <span className="bl-status" role="status" data-tone={tone}>
+      <i />
       {labels[s.status]}
     </span>
   );
@@ -170,7 +208,10 @@ function Transcript() {
         <div className="bl-empty">Your conversation will appear here.</div>
       ) : (
         grouped.map((event) => (
-          <div className={"bl-event bl-" + event.kind} key={event.sequence}>
+          <div
+            className={"bl-event bl-kind-" + event.kind}
+            key={event.sequence}
+          >
             <div className="bl-event-heading">
               <span>
                 {(
@@ -199,7 +240,8 @@ function Transcript() {
                 className="bl-text-button"
                 onClick={() => nav.toThread(event.threadId!)}
               >
-                Open thread ↗
+                Open thread
+                <Icon name="ArrowUpRight" style={{ width: 13, height: 13 }} />
               </button>
             )}
           </div>
@@ -269,8 +311,8 @@ function Details() {
     >
       <header>
         <div>
-          <span className="bl-eyebrow">BB LIVE</span>
-          <h2>Your conversation</h2>
+          <span className="bl-eyebrow">BB Live</span>
+          <h2>Transcript</h2>
         </div>
         <button
           ref={close}
@@ -288,7 +330,8 @@ function Details() {
           onClick={() => nav.toThread(p.threadId)}
         >
           <Icon name="AlertCircle" style={{ width: 18, height: 18 }} />
-          {p.title} ↗
+          <span>{p.title}</span>
+          <Icon name="ArrowUpRight" style={{ width: 14, height: 14 }} />
         </button>
       ))}
       <Transcript />
@@ -298,10 +341,11 @@ function Details() {
             className="bl-text-button"
             onClick={() => nav.toThread(s.operatorId!)}
           >
-            Open BB Operator ↗
+            Open BB Operator
+            <Icon name="ArrowUpRight" style={{ width: 13, height: 13 }} />
           </button>
         )}
-        <span>Text only · no audio recording</span>
+        <span>Text only · no audio is recorded</span>
       </footer>
     </section>
   );
@@ -365,11 +409,15 @@ function Overlay() {
         <aside
           ref={bar}
           className="bl bl-overlay"
+          data-status={s.status}
           aria-label="BB Live voice controls"
         >
           <div className="bl-mini">
-            <div className="bl-live-mark">
-              <Icon name="Mic" style={{ width: 20, height: 20 }} />
+            <div className="bl-live-mark" data-status={s.status}>
+              <Icon
+                name={s.muted && !s.ptt ? "MicOff" : "Mic"}
+                style={{ width: 18, height: 18 }}
+              />
             </div>
             <div>
               <Status />
@@ -387,6 +435,7 @@ function Overlay() {
           )}
           {s.pending.length > 0 && (
             <button className="bl-attention" onClick={() => live.details(true)}>
+              <Icon name="AlertCircle" style={{ width: 15, height: 15 }} />
               {s.pending.length} waiting for review
             </button>
           )}
@@ -443,16 +492,10 @@ function LivePage() {
         <div className="bl-layout">
           <section className="bl-conversation">
             <div className="bl-hero">
-              <span className="bl-eyebrow">
-                YOUR WORKSPACE, IN CONVERSATION
-              </span>
-              <h1>
-                One conversation.
-                <br />
-                All your work.
-              </h1>
+              <span className="bl-eyebrow">Voice for your workspace</span>
+              <h1>Talk to BB while your agents work.</h1>
               <p>Check in, change direction, or get something started.</p>
-              <Wave active={!!s.auth} />
+              <Wave />
               <Status />
               <div className="bl-start-row">
                 {s.auth ? (
@@ -488,7 +531,7 @@ function LivePage() {
                   {s.error}
                 </p>
               )}
-              <div className="bl-prompts">
+              <div className="bl-prompts" aria-label="Things you can say">
                 <span>“What needs my attention?”</span>
                 <span>“Start a review in the API project.”</span>
                 <span>“Tell that agent to preserve compatibility.”</span>
@@ -566,7 +609,10 @@ function LivePage() {
                             · {t.status}
                           </small>
                         </div>
-                        <span aria-hidden="true">↗</span>
+                        <Icon
+                          name="ArrowUpRight"
+                          style={{ width: 14, height: 14 }}
+                        />
                       </button>
                     ))}
                   {world.threads.length === 0 && <p>No threads yet.</p>}
@@ -577,21 +623,14 @@ function LivePage() {
               </>
             )}
             <div className="bl-continuity">
-              <Icon name="GitBranch" style={{ width: 19, height: 19 }} />
-              <p>
-                Your agents keep working
-                <br />
-                when the conversation ends.
-              </p>
+              <Icon name="GitBranch" style={{ width: 16, height: 16 }} />
+              <p>Agents keep working after the conversation ends.</p>
             </div>
           </aside>
         </div>
         <footer className="bl-page-footer">
-          <span>
-            <i />
-            One voice session across BB
-          </span>
-          <span>Microphone and speaker controls are independent</span>
+          <span>One voice session per BB</span>
+          <span>Text transcript only · no audio is recorded</span>
         </footer>
       </div>
     </main>
