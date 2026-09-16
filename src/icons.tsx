@@ -11,6 +11,7 @@ const paths: Record<string, string> = {
     "M4 3h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H8l-5 4V4a1 1 0 0 1 1-1Z",
   PhoneOff: "M3 15v-4a15 15 0 0 1 18 0v4l-5-1v-3a13 13 0 0 0-8 0v3ZM3 3l18 18",
   X: "m6 6 12 12M18 6 6 18",
+  ArrowUpRight: "M7 17 17 7M8 7h9v9",
   AlertCircle: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7v6M12 16v1",
   GitBranch:
     "M6 3v12a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM18 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM18 8c0 6-12 2-12 7",
