@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-bb-live",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "engines": {
     "bb": ">=0.43.1",

@@ -112,9 +112,16 @@ export async function createPreferences(bb: BbPluginApi) {
   if (stored !== undefined) current = preferencesSchema.parse(stored);
   else {
     // Migrate only declared non-secret fields from the old generic settings.
-    // A failed read must not silently overwrite an existing user's choices.
-    const legacy = await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId });
-    current = preferencesSchema.parse(legacy.values);
+    // Fresh installs cannot self-query settings during the factory (the plugin
+    // isn't registered yet), so fall back to schema defaults on 404.
+    let legacyValues: unknown = {};
+    try {
+      const legacy = await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId });
+      legacyValues = legacy.values;
+    } catch {
+      legacyValues = {};
+    }
+    current = preferencesSchema.parse(legacyValues);
     await bb.storage.kv.set(key, current);
   }
   let tail: Promise<unknown> = Promise.resolve();
