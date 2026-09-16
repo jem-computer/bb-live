@@ -121,7 +121,7 @@ A request from GPT-Live for backend work. The plugin combines the delegation ID 
 
 ### Global entry point
 
-Add a BB Live control to a global BB surface. Prefer a managed sidebar-footer action or disclosure for the idle entry point and an `experimental_appOverlay` for the active-session control bar. Feature-detect experimental APIs and degrade cleanly if unavailable.
+Use a managed sidebar-footer disclosure for both the idle entry point and active-session controls. Keep the session controller mounted through `experimental_appOverlay`, rendering no floating UI. Collapsing the disclosure or navigating must not end voice. Show active/attention state in the footer icon, and expand transcript/details inside the footer panel.
 
 The idle control shows:
 
@@ -129,7 +129,7 @@ The idle control shows:
 - Configuration-needed state
 - Connection or API error state
 
-The active-session bar remains mounted across route changes and shows:
+The session stays connected across route changes; its sidebar panel shows:
 
 - Listening, speaking, thinking, delegated, reconnecting, or error state
 - Current focus label
@@ -243,7 +243,7 @@ The backend should provide:
 The frontend should provide:
 
 - Global start-voice entry point.
-- App-wide active-session overlay.
+- Sidebar-footer session controls and a route-independent session controller.
 - Microphone permission and capture.
 - WebRTC peer connection and remote audio playback.
 - Independent microphone mute and output silence.
@@ -409,7 +409,7 @@ For long work, BB Live may provide sparse progress updates. Avoid narrating tool
 The first shippable release includes:
 
 1. Plugin scaffold, manifest, secret settings, and build pipeline.
-2. Global voice entry point and persistent active-session overlay.
+2. Global voice entry point and sidebar-footer session controls.
 3. WebRTC audio connection to `gpt-live-1`.
 4. Independent mute, push-to-talk, output silence, interrupt speech, and hang-up controls.
 5. Client delegation handled by the plugin backend.
@@ -474,7 +474,7 @@ Use a fake Live transport for deterministic automated tests, but do not claim fu
 
 ### Frontend tests
 
-- Global entry point and active overlay survive navigation.
+- The session survives navigation and footer collapse; collapsing releases hold-to-talk.
 - Microphone permission states.
 - Independent input mute and output silence.
 - Push-to-talk keyboard behavior around editable controls.

@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { definePluginApp, useRpc, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import type {
+  ExperimentalSidebarFooterDisclosureController,
+  ExperimentalSidebarFooterDisclosureProps,
+} from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./src/contract";
 import * as live from "./src/client";
 import { Icon } from "./src/icons";
 import { LiveSettings } from "./src/settings";
 import "./style.css";
-let hasOverlay = false;
+let footer: ExperimentalSidebarFooterDisclosureController | undefined;
+function openDetails() {
+  live.details(true);
+  footer?.open();
+}
 const useLive = () => useSyncExternalStore(live.subscribe, live.snapshot);
 function SettingsLink() {
   return (
@@ -93,14 +101,6 @@ function Controls() {
       <button aria-label="Stop talking" onClick={() => void live.interrupt()}>
         <Icon name="Square" style={{ width: 17, height: 17 }} />
         <span>Stop talking</span>
-      </button>
-      <button
-        aria-label="Open transcript and details"
-        aria-expanded={s.details}
-        onClick={() => live.details()}
-      >
-        <Icon name="MessageSquare" style={{ width: 20, height: 20 }} />
-        <span>Details</span>
       </button>
       <button
         className="bl-end"
@@ -256,15 +256,19 @@ function Details() {
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null;
     close.current?.focus();
-    return () => before?.focus();
+    return () => {
+      if (before?.isConnected) before.focus();
+    };
   }, []);
   return (
     <section
       className="bl-details"
-      role="dialog"
       aria-label="BB Live session details"
       onKeyDown={(e) => {
-        if (e.key === "Escape") live.details(false);
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          live.details(false);
+        }
       }}
     >
       <header>
@@ -311,10 +315,11 @@ function Controller() {
   const nav = useBbNavigate();
   const s = useLive();
   useEffect(() => {
-    const start = () => void live.start(null, null);
-    window.addEventListener("bb-live-start", start);
-    return () => window.removeEventListener("bb-live-start", start);
-  }, []);
+    if (s.status === "connecting") footer?.open();
+  }, [s.status]);
+  useEffect(() => {
+    if (s.error) footer?.open();
+  }, [s.error]);
   live.configure(rpc, nav.toThread);
   useEffect(() => {
     void live.refreshConfig();
@@ -327,72 +332,109 @@ function Controller() {
   }, []);
   return null;
 }
-function Overlay() {
+function FooterIcon({ className }: { className?: string }) {
   const s = useLive();
-  const bar = useRef<HTMLElement>(null);
-  const [barHeight, setBarHeight] = useState(100);
-  useEffect(() => {
-    if (!bar.current) return;
-    const observer = new ResizeObserver((entries) =>
-      setBarHeight(entries[0].contentRect.height + 24),
-    );
-    observer.observe(bar.current);
-    return () => observer.disconnect();
-  }, [!!s.auth, s.status === "connecting"]);
+  const active = !!s.auth || s.status === "connecting";
+  const attention = !!s.error || s.pending.length > 0 || s.audioBlocked;
   return (
-    <>
-      <Controller />
-      {s.error && !s.auth && (
-        <aside className="bl bl-overlay bl-global-error">
-          <p role="alert">{s.error}</p>
-          <StartButton />
-          <button aria-label="Dismiss voice error" onClick={live.dismissError}>
-            Dismiss
-          </button>
-        </aside>
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" />
+      {s.muted && active && <path d="m3 3 18 18" />}
+      {(active || attention) && (
+        <circle
+          cx="19"
+          cy="5"
+          r="3.5"
+          fill={attention ? "var(--destructive, #df8585)" : "#7bc39b"}
+          stroke="var(--background, #17151b)"
+          strokeWidth="1.5"
+        />
       )}
-      {s.details && (
-        <div
-          className="bl bl-details-wrap"
-          style={{
-            bottom: `calc(${barHeight + 28}px + env(safe-area-inset-bottom, 0px))`,
-          }}
+    </svg>
+  );
+}
+function FooterPanel({ dismiss }: ExperimentalSidebarFooterDisclosureProps) {
+  const s = useLive();
+  // Collapsing the footer must release a held microphone without ending voice.
+  useEffect(() => () => live.pushToTalk(false), []);
+  return (
+    <section className="bl bl-footer" aria-label="BB Live voice controls">
+      <header className="bl-footer-header">
+        <div className="bl-footer-status">
+          <strong>BB Live</strong>
+          <Status />
+          <p title={s.focus.label}>{s.focus.label}</p>
+        </div>
+        <button
+          className="bl-collapse"
+          aria-label="Collapse voice controls"
+          onClick={dismiss}
         >
-          <Details />
+          <Icon name="ChevronDown" />
+        </button>
+      </header>
+      {s.auth ? (
+        <Controls />
+      ) : s.status === "connecting" ? (
+        <button className="bl-text-button" onClick={() => void live.end()}>
+          Cancel connection
+        </button>
+      ) : (
+        <StartButton />
+      )}
+      {s.configured === false && (
+        <p className="bl-config">
+          Add your OpenAI API key in <SettingsLink />.
+        </p>
+      )}
+      {s.busy && !s.auth && s.status !== "connecting" && (
+        <p className="bl-config">Voice is open in another BB window.</p>
+      )}
+      {s.notice && (
+        <p className="bl-notice" role="status">
+          {s.notice}
+        </p>
+      )}
+      {s.error && (
+        <div className="bl-error">
+          <p role="alert">{s.error}</p>
+          <button className="bl-text-button" onClick={live.dismissError}>
+            Dismiss error
+          </button>
         </div>
       )}
-      {(s.auth || s.status === "connecting") && (
-        <aside
-          ref={bar}
-          className="bl bl-overlay"
-          aria-label="BB Live voice controls"
-        >
-          <div className="bl-mini">
-            <div className="bl-live-mark">
-              <Icon name="Mic" style={{ width: 20, height: 20 }} />
-            </div>
-            <div>
-              <Status />
-              <p>{s.focus.label}</p>
-            </div>
-            {s.status === "connecting" && (
-              <button onClick={() => void live.end()}>Cancel</button>
-            )}
-          </div>
-          {s.auth && <Controls />}
-          {s.audioBlocked && (
-            <button className="bl-play" onClick={live.play}>
-              Tap to enable sound
-            </button>
-          )}
-          {s.pending.length > 0 && (
-            <button className="bl-attention" onClick={() => live.details(true)}>
-              {s.pending.length} waiting for review
-            </button>
-          )}
-        </aside>
+      {s.audioBlocked && (
+        <button className="bl-play" onClick={live.play}>
+          Tap to enable sound
+        </button>
       )}
-    </>
+      {s.pending.length > 0 && (
+        <button className="bl-attention" onClick={openDetails}>
+          {s.pending.length} waiting for review
+        </button>
+      )}
+      <div className="bl-footer-links">
+        <button
+          className="bl-text-button"
+          aria-expanded={s.details}
+          onClick={() => live.details()}
+        >
+          <Icon name="MessageSquare" style={{ width: 16, height: 16 }} />
+          {s.details ? "Hide transcript" : "Transcript"}
+        </button>
+        <SettingsLink />
+      </div>
+      {s.details && <Details />}
+    </section>
   );
 }
 function LivePage() {
@@ -431,7 +473,6 @@ function LivePage() {
     ) ?? [];
   return (
     <main className="bl bl-page">
-      {!hasOverlay && <Controller />}
       <div className="bl-page-inner">
         <header className="bl-page-header">
           <div className="bl-wordmark">
@@ -456,10 +497,7 @@ function LivePage() {
               <Status />
               <div className="bl-start-row">
                 {s.auth ? (
-                  <button
-                    className="bl-start"
-                    onClick={() => live.details(true)}
-                  >
+                  <button className="bl-start" onClick={openDetails}>
                     <Icon
                       name="MessageSquare"
                       style={{ width: 19, height: 19 }}
@@ -494,8 +532,7 @@ function LivePage() {
                 <span>“Tell that agent to preserve compatibility.”</span>
               </div>
             </div>
-            {!hasOverlay && s.auth && <Controls />}
-            {!hasOverlay && s.details && <Details />}
+            {s.auth && <Controls />}
           </section>
           <aside className="bl-workspace">
             <header>
@@ -603,9 +640,7 @@ export default definePluginApp((app) => {
     title: "Preferences",
     component: LiveSettings,
   });
-  hasOverlay = typeof app.slots.experimental_appOverlay === "function";
-  if (hasOverlay)
-    app.slots.experimental_appOverlay({ id: "voice", component: Overlay });
+  app.slots.experimental_appOverlay({ id: "voice", component: Controller });
   app.slots.navPanel({
     id: "live",
     path: "live",
@@ -613,15 +648,15 @@ export default definePluginApp((app) => {
     icon: "Mic",
     component: LivePage,
   });
-  app.slots.sidebarFooterAction({
-    id: "start-voice",
-    title: "Start BB Live",
-    icon: "Mic",
-    run: (context) => {
-      const s = live.snapshot();
-      if (s.configured === false || !hasOverlay) context.openSettings();
-      else if (s.auth) live.details(true);
-      else window.dispatchEvent(new Event("bb-live-start"));
-    },
+  app.experimental_icons.register({
+    name: "bb-live:voice",
+    component: FooterIcon,
+  });
+  footer = app.experimental_sidebarFooter.register({
+    id: "voice",
+    kind: "disclosure",
+    label: "BB Live voice controls",
+    icon: "bb-live:voice",
+    component: FooterPanel,
   });
 });

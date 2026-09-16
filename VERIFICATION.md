@@ -4,7 +4,7 @@ Implementation level: **wired for real reads and writes; not end-to-end verified
 
 ## Implemented
 
-- Global sidebar voice entry, app overlay, responsive dashboard, transcript/details, explicit focus, native thread navigation, pending-interaction links.
+- Managed sidebar-footer voice controls, headless app-wide session controller, responsive dashboard, transcript/details, explicit focus, native thread navigation, pending-interaction links.
 - Server-owned `gpt-live-1` WebRTC creation and trusted sideband. Restricted browser data channel; separate structured intent-model request with bounded, schema-validated results.
 - Pinned visible Personal Operator discovery, creation, reuse, unarchive, deletion recovery, and durable instructions.
 - Real SDK reads for threads, status, output, queues and interactions; real send/start, queue-behind-active, steer and stop calls. Ambiguous planning requests are sent to the Operator.
@@ -26,7 +26,7 @@ Backend tests use BB's official fake host and a fake Live transport. Frontend me
 - Dashboard reads the actual BB projects/threads and counts, with no fixture workspace data.
 - `bb bb-live operator` created a thread in the Personal project; a second call returned the same ID. BB reports a visible pinned root thread owned by `bb-live`.
 - Operator initialization was queued behind the existing host concurrency limit. That limit was preserved.
-- Browser checks at desktop width and 390 × 844 confirmed no horizontal overflow. The active six-control iPhone bar had targets at least 49 pixels tall and 56 pixels wide.
+- Browser checks at desktop width and 390 × 844 confirmed no horizontal overflow. The original floating bar passed touch-target checks; it has since been replaced by the sidebar footer described below.
 - With a browser-local simulated media connection, microphone and speaker toggles were independent, routing to the Operator preserved the connection, and End stopped the microphone, closed the peer, and removed all audio elements. Browser test overrides were removed by reload. This was **not a GPT-Live call**.
 
 ## Settings upgrade
@@ -50,7 +50,7 @@ The Operator-to-project-worker flow is wired but has not executed through a comp
 - A result means the BB thread reached the reported state. Agent prose is labeled as a report, not independent proof that repository acceptance criteria passed.
 - A reload marks unresolved dispatches unknown and never replays them automatically. New sessions can reuse the Operator but do not restore a media connection.
 - iPhone backgrounding ends voice. Background continuity and native iOS audio routing have not been implemented or claimed.
-- The global overlay is feature-detected. Hosts without it get page-local controls that end on unmount.
+- Requires the managed sidebar-footer and app-overlay APIs in the declared BB/SDK minimum versions. The app-overlay slot owns only the session lifecycle and renders no UI.
 
 A source search found no remaining scaffold todo APIs, mock production adapters, placeholder handlers, or legacy per-thread/Realtime voice paths. The source product spec is preserved in `PRODUCT-SPEC.md`.
 
@@ -74,3 +74,9 @@ All 28 tests, typecheck, SDK pin check and plugin build pass. New regression cas
 Live browser checks verified opening persistence across page reload, restored defaults, and no horizontal overflow at 390px. Screenshot: artifacts/prompt-settings-iphone.png. A real GPT-Live WebRTC session used generated silence instead of the user's microphone and muted output. It connected with All of BB focus, received Opening accepted, and produced the exact default greeting in the output transcript. The session was ended and the generated stream released. This verifies the startup/sideband/greeting path, not audible quality or natural multi-project conversation.
 
 Jem also reported a successful real spoken session before this change. Remaining verification: conversational cross-project discovery, actual response style over multiple turns, full Operator-to-worker completion, and physical iPhone audio behavior.
+
+## Sidebar footer controls — 2026-09-16
+
+Implemented and browser-verified: the managed sidebar-footer disclosure owns status, start/cancel, mute, sound, stop-talking, end, hold-to-talk, attention links, errors, and an inline transcript/focus view. The app-overlay registration now renders only the headless controller. No fixed voice bar or floating transcript remains. A custom footer microphone marks active sessions and attention, including while collapsed.
+
+The original 28 tests, typecheck, SDK pin check, and build passed after the UI change. In the installed BB app, browser-only fake media/RPC responses verified independent mute/silence, hold-to-talk release on collapse, no end call on collapse, connection survival across thread navigation and mobile sidebar remounts, transcript Escape dismissal, speech interruption, and exactly one end call with stopped tracks/closed peer/no audio elements. Desktop and 390 × 844 footer panels had no horizontal overflow; mobile primary controls were at least 61 × 49 pixels and hold-to-talk was 44 pixels tall. Permission denial stayed inside the footer with retry available. Browser overrides were removed by reload. This check did not open a microphone or call OpenAI; physical iPhone Safari remains unverified.

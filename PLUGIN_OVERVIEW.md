@@ -2,7 +2,7 @@ Speak with BB while your agents work across projects. Ask for a briefing, focus 
 
 ## One conversation across BB
 
-A global voice bar stays with you as you navigate. Microphone mute, hold-to-talk, output silence, and end-session controls work independently. Open the transcript for conversation details, focus selection, and links to threads that need visual review.
+A compact voice panel lives above the sidebar footer and keeps the conversation connected as you navigate or collapse it. Microphone mute, hold-to-talk, output silence, and end-session controls work independently. Open the transcript for conversation details, focus selection, and links to threads that need visual review.
 
 ## Desktop and iPhone
 
