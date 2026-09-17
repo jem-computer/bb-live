@@ -1,3 +1,4 @@
+import { formatLatency } from "./src/latency";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { definePluginApp, useRpc, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type {
@@ -232,6 +233,11 @@ function Transcript() {
               </time>
             </div>
             <p>{event.text}</p>
+            {event.latency && (
+              <small className="bl-latency">
+                {formatLatency(event.latency)}
+              </small>
+            )}
             {event.threadId && (
               <button
                 className="bl-text-button"
