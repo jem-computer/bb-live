@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createPreferences, preferencesPatchSchema } from "../src/preferences";
+import {
+  createPreferences,
+  preferencesPatchSchema,
+  preferencesSchema,
+} from "../src/preferences";
 
 test("legacy preferences migrate once, exclude secrets, and survive reload", async () => {
   let reads = 0;
@@ -62,7 +66,7 @@ test("legacy preferences migrate once, exclude secrets, and survive reload", asy
   }
 });
 
-test("a failed migration does not save defaults over previous choices", async () => {
+test("fresh-install settings lookup failure falls back to persisted defaults", async () => {
   const { bb, harness } = createFakePluginHost({
     pluginId: "bb-live",
     sdk: {
@@ -74,8 +78,13 @@ test("a failed migration does not save defaults over previous choices", async ()
     },
   });
   try {
-    await assert.rejects(createPreferences(bb), /unavailable/);
-    assert.equal(await bb.storage.kv.get("preferences.v1"), undefined);
+    const prefs = await createPreferences(bb);
+    assert.deepEqual(prefs.get(), preferencesSchema.parse({}));
+    assert.deepEqual(await bb.storage.kv.get("preferences.v1"), prefs.get());
+    await prefs.update({ voice: "cedar", transcriptRetentionDays: 14 });
+    const reloaded = await createPreferences(bb);
+    assert.equal(reloaded.get().voice, "cedar");
+    assert.equal(reloaded.get().transcriptRetentionDays, 14);
   } finally {
     await harness.lifecycle.dispose();
   }
