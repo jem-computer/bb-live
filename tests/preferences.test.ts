@@ -35,6 +35,8 @@ test("legacy preferences migrate once, exclude secrets, and survive reload", asy
     assert.equal(prefs.get().routerModel, "custom-model");
     assert.equal(prefs.get().operatorModel, "custom-operator");
     assert.equal(prefs.get().transcriptRetentionDays, 14);
+    assert.equal(prefs.get().jevEnabled, false);
+    assert.equal(prefs.get().jevModel, "jev-latest");
     assert.ok(
       !JSON.stringify(await bb.storage.kv.get("preferences.v1")).includes(
         "sk-secret",
@@ -90,6 +92,25 @@ test("preference writes reject secrets and invalid retention", () => {
     { voicePrompt: "   " },
     { voicePrompt: "x".repeat(8001) },
     { opening: "x".repeat(1001) },
+    { typesafeApiKey: "secret" },
+    { jevEnabled: "yes" },
+    { jevModel: "" },
+    { jevBaseUrl: "not a url" },
   ])
     assert.equal(preferencesPatchSchema.safeParse(patch).success, false);
+});
+
+test("jev preferences default off and accept a gateway base URL", () => {
+  assert.deepEqual(
+    preferencesPatchSchema.parse({
+      jevEnabled: true,
+      jevModel: "jev-1.13.0",
+      jevBaseUrl: "https://gateway.example.com/typesafe/",
+    }),
+    {
+      jevEnabled: true,
+      jevModel: "jev-1.13.0",
+      jevBaseUrl: "https://gateway.example.com/typesafe/",
+    },
+  );
 });

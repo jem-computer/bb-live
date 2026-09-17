@@ -38,7 +38,11 @@ export const rpcContract = defineRpcContract({
   },
   config: {
     input: z.null(),
-    output: z.object({ configured: z.boolean(), busy: z.boolean() }),
+    output: z.object({
+      configured: z.boolean(),
+      busy: z.boolean(),
+      jev: z.object({ configured: z.boolean(), enabled: z.boolean() }),
+    }),
   },
   workspace: {
     input: z.null(),

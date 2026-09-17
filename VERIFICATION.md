@@ -37,6 +37,12 @@ Additional tests cover migration, credential exclusion, failure preservation, co
 
 Browser checks at 1280px desktop, 390px and 320px mobile widths confirmed containment and 44px settings controls. Ash audio loaded and advanced during playback; Stop worked. Voice and native model selections survived page reload; progress and intent dropdown saves worked. Original preferences were restored. BB's native picker opens as a mobile sheet. Screenshots remain in the ignored local `artifacts/` directory because they contain workspace context. These are Chromium viewport checks, not physical iPhone Safari verification.
 
+## Jev transport
+
+A TypeSafe Jev transport (`src/jev-transport.ts`) wraps the `systemone` Choice primitive with an injectable fetch, request validation (2–255 options, bounded state), a 10-second timeout, schema-validated responses, rejection of answers outside the offered options, and bounded error messages that never include the key, request body, or provider body. A second secret setting holds the TypeSafe key; `jevEnabled`, `jevModel`, and `jevBaseUrl` are non-secret preferences, default off. The `config` RPC and `bb bb-live status` report whether the key is set and whether routing is enabled. Nothing in the delegation path calls Jev yet.
+
+Tests cover request shape, base URL and model overrides, each documented error status, network failure and abort propagation, malformed and out-of-menu answers, pre-network validation, preference defaults and validation, and the config/status reporting. These use a mocked fetch and do not establish TypeSafe API compatibility.
+
 ## Remaining acceptance work
 
 Real SDP exchange, intent-model access, direct thread creation and result injection were verified with generated speech in the routing check below. Audible full duplex/barge-in, broader sideband event ordering, all mutation modes, and actual iPhone Safari microphone/autoplay/network behavior remain unverified.
