@@ -35,6 +35,7 @@ export function LiveSettings() {
   const [audioError, setAudioError] = useState("");
   const [customModel, setCustomModel] = useState(false);
   const [modelDraft, setModelDraft] = useState("");
+  const [jevConfigured, setJevConfigured] = useState<boolean | null>(null);
   const [promptDraft, setPromptDraft] = useState("");
   const [openingDraft, setOpeningDraft] = useState("");
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -53,6 +54,14 @@ export function LiveSettings() {
       .catch(() => {
         if (alive)
           setError("Settings couldn’t load. Reopen this page to retry.");
+      });
+    void rpc
+      .call("config")
+      .then((value) => {
+        if (alive) setJevConfigured(value.jev.configured);
+      })
+      .catch(() => {
+        if (alive) setJevConfigured(null);
       });
     void rpc
       .call("operatorDefaults")
@@ -396,6 +405,26 @@ export function LiveSettings() {
                   <button type="submit">Save</button>
                 </form>
               )}
+            </div>
+          </div>
+          <div className="bl-pref-row">
+            <div>
+              <label htmlFor="bl-jev">Jev routing</label>
+              <p>
+                Experimental. Classifies spoken requests with TypeSafe’s Jev
+                decision model before the intent model. Needs a TypeSafe API key
+                set with <code>bb plugin config</code>.
+                {jevConfigured === false && " No TypeSafe key is set yet."}
+              </p>
+            </div>
+            <div className="bl-pref-controls">
+              <input
+                id="bl-jev"
+                type="checkbox"
+                checked={prefs.jevEnabled}
+                disabled={jevConfigured === false}
+                onChange={(e) => void save({ jevEnabled: e.target.checked })}
+              />
             </div>
           </div>
         </details>

@@ -20,6 +20,7 @@ import {
   type LiveSocket,
 } from "./src/live-transport";
 import { createPreferences } from "./src/preferences";
+import { jevTransport, type JevTransport } from "./src/jev-transport";
 export { rpcContract };
 type Delegation = {
   id: string;
@@ -57,13 +58,32 @@ type Session = {
   openingEventId?: string;
   endPromise?: Promise<void>;
 };
-export async function setup(bb: BbPluginApi, live: LiveTransport = transport) {
+export async function setup(
+  bb: BbPluginApi,
+  live: LiveTransport = transport,
+  // Jev is wired here so router follow-ups can call it; nothing in the
+  // delegation path uses it yet.
+  jev: JevTransport = jevTransport,
+) {
+  void jev;
   const preferences = await createPreferences(bb);
   const secrets = bb.settings.define({
     openaiApiKey: { type: "string", label: "OpenAI API key", secret: true },
+    typesafeApiKey: {
+      type: "string",
+      label: "TypeSafe API key (Jev)",
+      secret: true,
+    },
   });
   const settings = {
     get: async () => ({ ...preferences.get(), ...(await secrets.get()) }),
+  };
+  const jevState = async () => {
+    const config = await settings.get();
+    return {
+      configured: !!config.typesafeApiKey,
+      enabled: config.jevEnabled && !!config.typesafeApiKey,
+    };
   };
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -890,6 +910,7 @@ export async function setup(bb: BbPluginApi, live: LiveTransport = transport) {
     config: async () => ({
       configured: !!(await settings.get()).openaiApiKey,
       busy: !!active,
+      jev: await jevState(),
     }),
     workspace,
     start: async ({ sdp }) => {
@@ -1267,6 +1288,7 @@ ${redact(directory, [s.key])}`;
         exitCode: 0,
         stdout: JSON.stringify({
           configured: !!(await settings.get()).openaiApiKey,
+          jev: await jevState(),
           active: active
             ? { id: active.id, status: active.status, focus: active.focus }
             : null,

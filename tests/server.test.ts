@@ -420,6 +420,28 @@ test("saved preferences drive voice, intent routing, and new Operator execution"
   }
 });
 
+test("jev is reported unconfigured and off until a TypeSafe key exists", async () => {
+  const f = await fixture();
+  try {
+    const before = await f.call("config");
+    assert.deepEqual(before.jev, { configured: false, enabled: false });
+    // The flag alone does not enable routing without a key.
+    await f.call("savePreferences", { jevEnabled: true });
+    assert.deepEqual((await f.call("config")).jev, {
+      configured: false,
+      enabled: false,
+    });
+    await assert.rejects(f.call("savePreferences", { typesafeApiKey: "bad" }));
+    const status = JSON.parse(
+      (await f.harness.behavior.runCli(["status"])).stdout ?? "",
+    );
+    assert.deepEqual(status.jev, { configured: false, enabled: false });
+    assert.ok(!JSON.stringify(status).includes(key));
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
 test("global discovery finds another project beyond the first page without sidebar focus", async () => {
   const f = await fixture();
   try {

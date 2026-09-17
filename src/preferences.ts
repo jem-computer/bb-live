@@ -76,6 +76,15 @@ export const preferencesSchema = z.object({
     .enum(["quiet", "important", "verbose"])
     .default("important"),
   transcriptRetentionDays: z.number().int().min(0).max(365).default(30),
+  // Jev routing is off until the router follow-ups land and are verified.
+  jevEnabled: z.boolean().default(false),
+  jevModel: identifier.default("jev-latest"),
+  jevBaseUrl: z
+    .string()
+    .trim()
+    .url()
+    .max(400)
+    .default("https://api.typesafe.ai/v1"),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 export const preferencesPatchSchema = z
@@ -102,6 +111,9 @@ export const preferencesPatchSchema = z
     transcriptRetentionDays: preferencesSchema.shape.transcriptRetentionDays
       .removeDefault()
       .optional(),
+    jevEnabled: preferencesSchema.shape.jevEnabled.removeDefault().optional(),
+    jevModel: preferencesSchema.shape.jevModel.removeDefault().optional(),
+    jevBaseUrl: preferencesSchema.shape.jevBaseUrl.removeDefault().optional(),
   })
   .strict();
 
