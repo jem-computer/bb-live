@@ -651,6 +651,13 @@
   flex-direction: column;
   gap: 4px;
 }
+.bl-latency {
+  display: block;
+  color: var(--bl-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
 .bl-event-heading {
   display: flex;
   justify-content: space-between;

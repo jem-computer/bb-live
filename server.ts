@@ -21,6 +21,15 @@ import {
 } from "./src/live-transport";
 import { createPreferences } from "./src/preferences";
 import { jevTransport, type JevTransport } from "./src/jev-transport";
+import {
+  newLatency,
+  safeModel,
+  classifyUsageSchema,
+  summarizeLatency,
+  LATENCY_WINDOW,
+  MAX_LATENCY_WINDOW,
+  type DelegationLatency,
+} from "./src/latency";
 export { rpcContract };
 type Delegation = {
   id: string;
@@ -30,6 +39,8 @@ type Delegation = {
   state: string;
   operator: boolean;
   requestedAt: number;
+  latency: DelegationLatency;
+  resultEventId?: string;
 };
 type Session = {
   id: string;
@@ -47,6 +58,7 @@ type Session = {
   chain: Promise<void>;
   seen: Set<string>;
   transcripts: { role: string; text: string; start: number; end: number }[];
+  speechEnds: number[];
   pending: { id: string; threadId: string; title: string }[];
   openThreadId: string | null;
   retention: number;
@@ -91,6 +103,8 @@ export async function setup(
     `CREATE TABLE voice_sessions (id TEXT PRIMARY KEY, openai_session_id TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, focus_json TEXT NOT NULL, status TEXT NOT NULL, summary TEXT)`,
     `CREATE TABLE voice_session_events (session_id TEXT NOT NULL, sequence INTEGER NOT NULL, timestamp INTEGER NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(session_id,sequence))`,
     `CREATE TABLE delegations (id TEXT NOT NULL, session_id TEXT NOT NULL, target_id TEXT, queue_id TEXT, status TEXT NOT NULL, requested_at INTEGER NOT NULL, completed_at INTEGER, verified_result TEXT, operator INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,id))`,
+    `ALTER TABLE delegations ADD COLUMN metrics_json TEXT`,
+    `CREATE INDEX delegations_session_requested ON delegations(session_id,requested_at DESC)`,
   ]);
   db.prepare(
     "UPDATE voice_sessions SET status='interrupted',ended_at=? WHERE ended_at IS NULL",
@@ -110,6 +124,7 @@ export async function setup(
     kind: string,
     text: string,
     threadId: string | null = null,
+    delegationId?: string,
   ) {
     const event = {
       sequence: ++s.sequence,
@@ -117,6 +132,7 @@ export async function setup(
       kind,
       text: clean(text, s),
       threadId,
+      ...(delegationId ? { delegationId } : {}),
     };
     s.events.push(event);
     if (s.events.length > 160) s.events.shift();
@@ -140,9 +156,10 @@ export async function setup(
     id: string | null = null,
     kind = "commentary",
   ) {
+    const eventId = randomUUID();
     s.socket?.send({
       type: `session.${kind}.append`,
-      event_id: randomUUID(),
+      event_id: eventId,
       delegation_id: id,
       content: clean(text, s)
         .replace(
@@ -151,6 +168,7 @@ export async function setup(
         )
         .slice(0, 6000),
     });
+    return eventId;
   }
   function authorized(auth: SessionAuth) {
     if (
@@ -389,6 +407,20 @@ export async function setup(
       ? { instructions: OPERATOR_PROMPT }
       : {}),
   }));
+  function saveLatency(d: Delegation) {
+    db.prepare(
+      "UPDATE delegations SET metrics_json=? WHERE session_id=? AND id=?",
+    ).run(JSON.stringify(d.latency), d.sessionId, d.id);
+  }
+  function finishDispatch(d: Delegation) {
+    if (
+      d.latency.dispatchStartedAt !== null &&
+      d.latency.dispatchFinishedAt === null
+    ) {
+      d.latency.dispatchFinishedAt = Date.now();
+      saveLatency(d);
+    }
+  }
   function update(d: Delegation, state: string, result?: string) {
     d.state = state;
     db.prepare(
@@ -410,10 +442,14 @@ export async function setup(
     text: string,
     state = "completed",
   ) {
+    finishDispatch(d);
+    d.latency.resultReadyAt ??= Date.now();
+    saveLatency(d);
     text = clean(text, s);
     update(d, state, s.retention > 0 ? text : undefined);
     emit(s, state === "failed" ? "failure" : "result", text, d.target);
-    if (s.status !== "ended") append(s, text, d.id);
+    if (!s.abort.signal.aborted && s.socket)
+      d.resultEventId = append(s, text, d.id);
   }
   async function end(s: Session, reason: string) {
     if (s.endPromise) return s.endPromise;
@@ -448,6 +484,7 @@ export async function setup(
       );
       s.key = "";
       s.transcripts = [];
+      s.speechEnds = [];
       if (active === s) active = null;
     });
     return s.endPromise;
@@ -455,6 +492,10 @@ export async function setup(
   async function delegate(s: Session, id: string, offset: number) {
     if (s.seen.has(id) || s.abort.signal.aborted) return;
     s.seen.add(id);
+    const receivedAt = Date.now();
+    const speechEnd = s.speechEnds
+      .filter((end) => end <= offset)
+      .reduce<number | null>((latest, end) => Math.max(latest ?? 0, end), null);
     const d: Delegation = {
       id,
       sessionId: s.id,
@@ -462,12 +503,15 @@ export async function setup(
       queueId: null,
       state: "received",
       operator: false,
-      requestedAt: Date.now(),
+      requestedAt: receivedAt,
+      latency: newLatency(receivedAt, offset, speechEnd),
     };
     delegations.set(`${s.id}:${id}`, d);
     db.prepare(
       "INSERT INTO delegations (id,session_id,status,requested_at) VALUES (?,?,?,?)",
     ).run(id, s.id, d.state, d.requestedAt);
+    saveLatency(d);
+    emit(s, "delegation", "Request received.", null, d.id);
     // Freeze context at delegation time, rather than including later utterances in an earlier request.
     const requestFocus = { ...s.focus };
     const transcript = s.transcripts
@@ -486,20 +530,46 @@ export async function setup(
         const world = await workspace();
         for (const p of world.projects) s.names.set(p.id, p.name);
         for (const t of world.threads) s.names.set(t.id, t.title);
-        const intent = await live.classify(
-          s.key,
-          config.routerModel,
-          JSON.stringify({
-            conversation: transcript,
-            focus: requestFocus,
-            workspace: world,
-          }),
-          s.abort.signal,
-        );
+        d.latency.requestedModel = safeModel(config.routerModel);
+        d.latency.classifyStartedAt = Date.now();
+        saveLatency(d);
+        let intent;
+        try {
+          intent = await live.classify(
+            s.key,
+            config.routerModel,
+            JSON.stringify({
+              conversation: transcript,
+              focus: requestFocus,
+              workspace: world,
+            }),
+            s.abort.signal,
+            (report) => {
+              if (d.latency.classifiers.length >= 4) {
+                d.latency.classifyReportsDropped++;
+                saveLatency(d);
+                return;
+              }
+              const parsed = classifyUsageSchema.safeParse(report);
+              if (parsed.success) {
+                d.latency.classifiers.push({
+                  ...parsed.data,
+                  model: safeModel(parsed.data.model),
+                });
+                saveLatency(d);
+              }
+            },
+          );
+        } finally {
+          d.latency.classifyFinishedAt = Date.now();
+          saveLatency(d);
+        }
         if (s.abort.signal.aborted) {
           update(d, "cancelled");
           return;
         }
+        d.latency.dispatchStartedAt = Date.now();
+        saveLatency(d);
         if (intent.uncertain || intent.action === "clarify") {
           result(
             s,
@@ -640,6 +710,7 @@ export async function setup(
               delegationId: d.id,
             },
           });
+          finishDispatch(d);
           d.target = thread.id;
           update(d, "working");
           const title = thread.title ?? thread.titleFallback ?? "New thread";
@@ -740,6 +811,8 @@ export async function setup(
             "The request could not be verified. Inspect the thread before trying again; the action may already have been accepted.",
             "failed",
           );
+      } finally {
+        finishDispatch(d);
       }
     });
     await s.chain;
@@ -787,6 +860,7 @@ export async function setup(
       mode: mode === "steer" ? "steer" : "start",
       permissionMode: "accept-edits",
     });
+    finishDispatch(d);
     if (sent.delivery === "queued") {
       d.queueId = sent.queuedMessage.id;
       update(d, "dispatched");
@@ -853,9 +927,41 @@ export async function setup(
       if (typeof event.delta !== "string") return;
       const role =
         event.type === "session.input_transcript.delta" ? "user" : "BB";
+      // Only an explicit client event correlation can attribute speech to a result.
+      // Uncorrelated speech and append acknowledgments are never counted as spoken.
+      if (
+        role === "BB" &&
+        event.delta.length > 0 &&
+        typeof event.client_event_id === "string"
+      ) {
+        const d = [...delegations.values()].find(
+          (d) =>
+            d.sessionId === s.id && d.resultEventId === event.client_event_id,
+        );
+        if (d && d.latency.resultSpokenAt === null) {
+          d.latency.resultSpokenAt = Date.now();
+          saveLatency(d);
+        }
+      }
       const text = clean(event.delta, s);
-      const start = typeof event.start_ms === "number" ? event.start_ms : 0;
-      const finish = typeof event.end_ms === "number" ? event.end_ms : start;
+      const validTime = (v: unknown): v is number =>
+        typeof v === "number" &&
+        Number.isFinite(v) &&
+        v >= 0 &&
+        v <= Number.MAX_SAFE_INTEGER;
+      const start = validTime(event.start_ms) ? event.start_ms : 0;
+      const finish =
+        validTime(event.end_ms) && event.end_ms >= start ? event.end_ms : start;
+      if (
+        role === "user" &&
+        event.delta.length > 0 &&
+        validTime(event.start_ms) &&
+        validTime(event.end_ms) &&
+        event.end_ms >= event.start_ms
+      ) {
+        s.speechEnds.push(event.end_ms);
+        if (s.speechEnds.length > 80) s.speechEnds.shift();
+      }
       const prev = s.transcripts.at(-1);
       if (
         prev &&
@@ -865,15 +971,28 @@ export async function setup(
       ) {
         prev.text += text;
         prev.end = finish;
-      } else s.transcripts.push({ role, text, start, end: finish });
+      } else
+        s.transcripts.push({
+          role,
+          text,
+          start,
+          end: finish,
+        });
       if (s.transcripts.length > 80) s.transcripts.shift();
       emit(s, role === "user" ? "user" : "speech", text);
     }
     if (event.type === "session.delegation.created") {
       const parsed = z
         .object({
-          delegation: z.object({ id: z.string(), target: z.literal("client") }),
-          offset_ms: z.number(),
+          delegation: z.object({
+            id: z.string().min(1).max(200),
+            target: z.literal("client"),
+          }),
+          offset_ms: z
+            .number()
+            .finite()
+            .nonnegative()
+            .max(Number.MAX_SAFE_INTEGER),
         })
         .safeParse(event);
       if (parsed.success)
@@ -937,6 +1056,7 @@ export async function setup(
         chain: Promise.resolve(),
         seen: new Set(),
         transcripts: [],
+        speechEnds: [],
         pending: [],
         openThreadId: null,
         retention: config.transcriptRetentionDays,
@@ -1018,7 +1138,12 @@ ${redact(directory, [s.key])}`;
       return {
         status: s.status,
         focus: s.focus,
-        events: s.events,
+        events: s.events.map((event) => {
+          const d = event.delegationId
+            ? delegations.get(`${s.id}:${event.delegationId}`)
+            : null;
+          return d ? { ...event, latency: d.latency } : event;
+        }),
         pending: s.pending,
         openThreadId: s.openThreadId,
       };
@@ -1274,7 +1399,7 @@ ${redact(directory, [s.key])}`;
       {
         name: "status",
         summary: "Show configuration and recent session records",
-        usage: "bb bb-live status",
+        usage: "bb bb-live status [--last 1-1000] [--session ID]",
       },
     ],
     async run(argv) {
@@ -1282,8 +1407,47 @@ ${redact(directory, [s.key])}`;
         const id = await ensureOperator();
         return { exitCode: 0, stdout: JSON.stringify({ operatorId: id }) };
       }
+      const usage =
+        "Usage: bb bb-live status [--last 1-1000] [--session ID] | operator";
       if (argv[0] && argv[0] !== "status")
-        return { exitCode: 1, stderr: "Usage: bb bb-live status | operator" };
+        return { exitCode: 1, stderr: usage };
+      let last = LATENCY_WINDOW,
+        sessionId: string | null = null;
+      for (let i = 1; i < argv.length; i += 2) {
+        if (argv[i] === "--last" && /^\d+$/.test(argv[i + 1] ?? "")) {
+          last = Number(argv[i + 1]);
+          if (last < 1 || last > MAX_LATENCY_WINDOW)
+            return { exitCode: 1, stderr: usage };
+        } else if (
+          argv[i] === "--session" &&
+          argv[i + 1] &&
+          argv[i + 1].length <= 200
+        ) {
+          sessionId = argv[i + 1];
+        } else return { exitCode: 1, stderr: usage };
+      }
+      const cutoff = Date.now() - 90 * 86400000;
+      const sessions = (
+        sessionId
+          ? db
+              .prepare(
+                "SELECT id,started_at,ended_at,status,summary FROM voice_sessions WHERE id=? AND started_at>=? LIMIT 1",
+              )
+              .all(sessionId, cutoff)
+          : db
+              .prepare(
+                "SELECT id,started_at,ended_at,status,summary FROM voice_sessions WHERE started_at>=? ORDER BY started_at DESC LIMIT 5",
+              )
+              .all(cutoff)
+      ) as {
+        id: string;
+        started_at: number;
+        ended_at: number | null;
+        status: string;
+        summary: string | null;
+      }[];
+      if (sessionId && !sessions.length)
+        return { exitCode: 1, stderr: "No retained session found." };
       return {
         exitCode: 0,
         stdout: JSON.stringify({
@@ -1292,11 +1456,28 @@ ${redact(directory, [s.key])}`;
           active: active
             ? { id: active.id, status: active.status, focus: active.focus }
             : null,
-          sessions: db
-            .prepare(
-              "SELECT id,started_at,ended_at,status,summary FROM voice_sessions ORDER BY started_at DESC LIMIT 5",
-            )
-            .all(),
+          latency: {
+            version: 1,
+            window: last,
+            retentionDays: 90,
+            percentile: "nearest-rank",
+            voiceTiming:
+              "Live = delegation offset minus latest preceding user transcript end (not authoritative turn end). Speech = first output transcript correlated to the final result client_event_id (not playback); absent correlation stays null.",
+            dispatchTiming:
+              "Post-classify resolution and BB action acceptance, including reads/local replies; excludes queued execution and agent work.",
+            cost: "Reported USD only; missing values are null. Usage totals include only delegations with complete reports for that field.",
+          },
+          sessions: sessions.map((session) => ({
+            ...session,
+            latency: summarizeLatency(
+              db
+                .prepare(
+                  "SELECT metrics_json,status FROM delegations WHERE session_id=? AND requested_at>=? ORDER BY requested_at DESC,rowid DESC LIMIT ?",
+                )
+                .all(session.id, cutoff, last) as { metrics_json: unknown }[],
+              last,
+            ),
+          })),
         }),
       };
     },

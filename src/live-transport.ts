@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { classifyUsage, type ClassifyUsage } from "./latency";
 import { z } from "zod";
 import { intentSchema, ROUTER_PROMPT, type Intent } from "./policy";
 export interface LiveTransport {
@@ -20,6 +21,7 @@ export interface LiveTransport {
     model: string,
     context: string,
     signal: AbortSignal,
+    onUsage?: (usage: ClassifyUsage) => void,
   ): Promise<Intent>;
   closeRemote(key: string, id: string): Promise<void>;
 }
@@ -131,7 +133,7 @@ export const transport: LiveTransport = {
       });
     });
   },
-  async classify(key, model, context, signal) {
+  async classify(key, model, context, signal, onUsage) {
     const raw = await api(
       key,
       "responses",
@@ -152,6 +154,7 @@ export const transport: LiveTransport = {
       },
       signal,
     );
+    onUsage?.(classifyUsage(raw, model));
     const chunks = z
       .object({
         output: z.array(

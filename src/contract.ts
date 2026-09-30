@@ -5,6 +5,7 @@ import {
   preferencesPatchSchema,
   reasoningSchema,
 } from "./preferences";
+import { latencySchema } from "./latency";
 import { focusSchema } from "./policy";
 export const authSchema = z.object({
   id: z.string().uuid(),
@@ -16,6 +17,8 @@ const eventSchema = z.object({
   kind: z.string(),
   text: z.string(),
   threadId: z.string().nullable(),
+  delegationId: z.string().optional(),
+  latency: latencySchema.optional(),
 });
 export type LiveEvent = z.infer<typeof eventSchema>;
 const threadSchema = z.object({

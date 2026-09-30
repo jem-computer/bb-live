@@ -60,3 +60,13 @@ Official API contracts used: [WebRTC](https://developers.openai.com/api/docs/gui
 ## License
 
 [MIT](LICENSE). Security reports: [SECURITY.md](SECURITY.md).
+
+### Delegation latency baseline
+
+`bb bb-live status` includes p50/p95 milliseconds and sample counts for the last 100 delegations in each of the five most recent sessions. Use `bb bb-live status --last 500 --session SESSION_ID` to revisit a retained session or choose a window (1–1,000). Save the JSON before and after the router rollout; `sessions[].latency.byModel` separates the requested model, actual answering model names, and `answeredBy` (`jev`, `terra`, `both`, or `other`). Up to eight model groups are returned, with an explicit omitted-group count. The current router still uses the configured Responses model; this instrumentation does not enable Jev.
+
+Stages separate the Live speech-to-delegation proxy, waiting for classification (serialization and workspace lookup), classify, dispatch, receipt-to-dispatch, work/result wait, and result-to-speech proxy. Dispatch ends when BB accepts an action or resolves a read/local reply, not when queued work finishes. Failed and interrupted attempts stay in the sample; outcome counts distinguish them. Percentiles use nearest rank and omit missing stages. Legacy records count as sampled but uninstrumented, never as zero-duration calls.
+
+Live's input transcript fragments provide the preceding speech timestamp, not an authoritative turn end. Result speech is recorded only for the first output transcript whose `client_event_id` matches the final result append; acknowledgment and unrelated speech do not qualify. These are transcript-based proxies, not proof of audible playback. Missing correlation remains null. The transcript panel shows the same stage breakdown for each current-session delegation.
+
+Classifier telemetry contains only bounded model names and numbers: input/output/total tokens, cached input and reasoning tokens when supplied, and explicitly USD-denominated API-reported cost (`usage.cost_usd` or `cost_usd`) when supplied. No price-table cost is invented. Missing cost is null, and totals carry their own sample counts. The versioned numeric record lives with its delegation, survives disabled transcript retention and reloads, and expires under the existing 90-day operational retention rule.

@@ -7,9 +7,10 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import { setup } from "../server";
 import type { Intent } from "../src/policy";
+import { classifyUsage, newLatency } from "../src/latency";
 import type { LiveTransport } from "../src/live-transport";
 const key = "sk-test-do-not-leak";
-async function fixture(retention = 30) {
+async function fixture(retention = 30, legacy = false) {
   const operator = makeThreadResponse({
     id: "operator",
     projectId: "personal",
@@ -36,6 +37,7 @@ async function fixture(retention = 30) {
     uncertain: false,
   };
   const sent: Record<string, unknown>[] = [];
+  let classifyOverride: LiveTransport["classify"] | null = null;
   const fake: LiveTransport = {
     async create(_key, _sdp, voice, _signal, instructions) {
       transportSettings.instructions = instructions;
@@ -55,9 +57,20 @@ async function fixture(retention = 30) {
         },
       };
     },
-    async classify(_key, model, context) {
+    async classify(_key, model, context, signal, onUsage) {
       transportSettings.context = context;
       transportSettings.model = model;
+      if (classifyOverride)
+        return classifyOverride(_key, model, context, signal, onUsage);
+      onUsage?.(
+        classifyUsage(
+          {
+            model,
+            usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+          },
+          model,
+        ),
+      );
       return intent;
     },
     async closeRemote() {},
@@ -114,6 +127,20 @@ async function fixture(retention = 30) {
     },
   });
   const db = bb.storage.database();
+  if (legacy) {
+    bb.storage.migrate(db, [
+      `CREATE TABLE operator_state (singleton_key TEXT PRIMARY KEY, operator_thread_id TEXT NOT NULL, schema_version INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+      `CREATE TABLE voice_sessions (id TEXT PRIMARY KEY, openai_session_id TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, focus_json TEXT NOT NULL, status TEXT NOT NULL, summary TEXT)`,
+      `CREATE TABLE voice_session_events (session_id TEXT NOT NULL, sequence INTEGER NOT NULL, timestamp INTEGER NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(session_id,sequence))`,
+      `CREATE TABLE delegations (id TEXT NOT NULL, session_id TEXT NOT NULL, target_id TEXT, queue_id TEXT, status TEXT NOT NULL, requested_at INTEGER NOT NULL, completed_at INTEGER, verified_result TEXT, operator INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,id))`,
+    ]);
+    db.prepare(
+      "INSERT INTO voice_sessions (id,started_at,ended_at,focus_json,status) VALUES ('legacy',?,?,'{}','ended')",
+    ).run(Date.now(), Date.now());
+    db.prepare(
+      "INSERT INTO delegations (id,session_id,status,requested_at) VALUES ('legacy-request','legacy','completed',?)",
+    ).run(Date.now());
+  }
   await setup(bb, fake);
   const call = async (method: string, input: unknown = null) => {
     return (await harness.behavior.callRpc(method, input)) as any;
@@ -141,6 +168,10 @@ async function fixture(retention = 30) {
   }
   return {
     db,
+    setClassify: (fn: LiveTransport["classify"]) => {
+      classifyOverride = fn;
+    },
+    reload: () => harness.lifecycle.reload((bb) => setup(bb, fake)),
     harness,
     call,
     start,
@@ -887,6 +918,435 @@ test("project-level follow-up investigates ownership instead of demanding thread
     assert.ok(
       !f.sent.some((e) => String(e.content).includes("name or select")),
     );
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+const latencyOf = (f: Awaited<ReturnType<typeof fixture>>, id = "d1") =>
+  JSON.parse(
+    (
+      f.db
+        .prepare("SELECT metrics_json FROM delegations WHERE id=?")
+        .get(id) as any
+    ).metrics_json,
+  );
+const statusOf = async (
+  f: Awaited<ReturnType<typeof fixture>>,
+  args = ["status"],
+) => {
+  const result = await f.harness.behavior.runCli(args);
+  assert.equal(result.exitCode, 0, result.stderr);
+  return JSON.parse(result.stdout!);
+};
+
+test("latency persists at zero text retention; status and transcript expose stages and correlated result speech", async () => {
+  const f = await fixture(0);
+  try {
+    const session = await f.start();
+    await f.event({
+      action: "status",
+      target: "Release",
+      message: "private transcript",
+      uncertain: false,
+    });
+    const m = latencyOf(f);
+    assert.equal(m.delegationOffsetMs - m.speechEndOffsetMs, 10);
+    assert.ok(m.eventReceivedAt <= m.classifyStartedAt);
+    assert.ok(m.classifyStartedAt <= m.classifyFinishedAt);
+    assert.ok(m.classifyFinishedAt <= m.dispatchStartedAt);
+    assert.ok(m.dispatchStartedAt <= m.dispatchFinishedAt);
+    assert.ok(m.dispatchFinishedAt <= m.resultReadyAt);
+    assert.equal(m.classifiers[0].model, "gpt-5.6-terra");
+    assert.equal(m.classifiers[0].inputTokens, 100);
+    assert.equal(m.classifiers[0].reportedCostUsd, null);
+    const result = f.sent.filter((e) => e.delegation_id === "d1").at(-1)!;
+    f.onEvent({
+      type: "session.commentary.appended",
+      client_event_id: result.event_id,
+      start_ms: 120,
+      end_ms: 130,
+    });
+    f.onEvent({
+      type: "session.output_transcript.delta",
+      delta: "Unrelated speech",
+      start_ms: 140,
+      end_ms: 150,
+    });
+    assert.equal(latencyOf(f).resultSpokenAt, null);
+    f.onEvent({
+      type: "session.output_transcript.delta",
+      delta: "Result",
+      client_event_id: result.event_id,
+      start_ms: 200,
+      end_ms: 210,
+    });
+    const spoken = latencyOf(f).resultSpokenAt;
+    assert.ok(spoken >= m.resultReadyAt);
+    f.onEvent({
+      type: "session.output_transcript.delta",
+      delta: " continuation",
+      client_event_id: result.event_id,
+      start_ms: 220,
+      end_ms: 230,
+    });
+    assert.equal(latencyOf(f).resultSpokenAt, spoken);
+    const state = await f.call("snapshot", {
+      id: session.id,
+      token: session.token,
+    });
+    assert.equal(
+      state.events.find((e: any) => e.delegationId === "d1").latency
+        .resultSpokenAt,
+      spoken,
+    );
+    const status = await statusOf(f);
+    assert.equal(status.sessions[0].latency.stagesMs.classify.n, 1);
+    assert.equal(
+      status.sessions[0].latency.stagesMs.liveSpeechToDelegationProxy.p50,
+      10,
+    );
+    assert.equal(status.sessions[0].latency.byModel[0].answeredBy, "terra");
+    assert.equal(
+      status.sessions[0].latency.classifyUsage.reportedCostUsd.total,
+      null,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(status),
+      /private transcript|Unrelated speech|sk-test/,
+    );
+    assert.doesNotMatch(JSON.stringify(m), /private transcript|sk-test/);
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT count(*) AS n FROM voice_session_events")
+          .get() as any
+      ).n,
+      0,
+    );
+    await f.call("control", {
+      id: session.id,
+      token: session.token,
+      command: "end",
+    });
+    const reloaded = await f.reload();
+    try {
+      const output = await reloaded.harness.behavior.runCli(["status"]);
+      assert.equal(output.exitCode, 0, output.stderr);
+      assert.equal(
+        JSON.parse(output.stdout!).sessions[0].latency.stagesMs.classify.n,
+        1,
+      );
+    } finally {
+      await reloaded.harness.lifecycle.dispose();
+    }
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("failed classify preserves reported usage, closes its span and leaves dispatch absent", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    f.setClassify(async (_key, model, _context, _signal, report) => {
+      report?.(
+        classifyUsage(
+          { model, usage: { input_tokens: 17, cost_usd: 0.004 } },
+          model,
+        ),
+      );
+      throw new Error("private malformed output");
+    });
+    await f.event({
+      action: "status",
+      target: "Release",
+      message: "hello",
+      uncertain: false,
+    });
+    const m = latencyOf(f);
+    assert.ok(m.classifyFinishedAt >= m.classifyStartedAt);
+    assert.equal(m.dispatchStartedAt, null);
+    assert.equal(m.dispatchFinishedAt, null);
+    assert.equal(m.classifiers[0].reportedCostUsd, 0.004);
+    const status = await statusOf(f);
+    assert.equal(status.sessions[0].latency.outcomes.failed, 1);
+    assert.equal(status.sessions[0].latency.stagesMs.dispatch.n, 0);
+    assert.doesNotMatch(JSON.stringify(status), /private malformed output/);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("queued dispatch records acceptance separately from work and result speech", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    f.harness.sdk.stub("threads.send", async () => ({
+      ok: true,
+      delivery: "queued",
+      queuedMessage: makeQueueEntry({ id: "q1", threadId: "worker" }),
+    }));
+    await f.event({
+      action: "send",
+      target: "Release",
+      message: "do work",
+      uncertain: false,
+    });
+    const m = latencyOf(f);
+    assert.ok(m.dispatchFinishedAt >= m.dispatchStartedAt);
+    assert.equal(m.resultReadyAt, null);
+    const ack = f.sent.filter((e) => e.delegation_id === "d1").at(-1)!;
+    f.onEvent({
+      type: "session.output_transcript.delta",
+      client_event_id: ack.event_id,
+      delta: "Queued",
+      start_ms: 120,
+      end_ms: 140,
+    });
+    assert.equal(latencyOf(f).resultSpokenAt, null);
+    f.onEvent({
+      type: "session.delegation.created",
+      offset_ms: 110,
+      delegation: { id: "d1", target: "client" },
+    });
+    assert.equal((await statusOf(f)).sessions[0].latency.sampled, 1);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("status supports retained-session before/after comparisons, windows, legacy rows and expiry", async () => {
+  const f = await fixture(0);
+  try {
+    const session = await f.start();
+    const at = Date.now();
+    const add = (
+      id: string,
+      age: number,
+      model: string,
+      duration: number,
+      instrumented = true,
+    ) => {
+      const m = newLatency(at - age, 100, 90);
+      m.requestedModel = model;
+      m.classifiers = [
+        classifyUsage(
+          {
+            model,
+            usage: {
+              input_tokens: 100,
+              output_tokens: 10,
+              total_tokens: 110,
+              cost_usd: 0.01,
+            },
+          },
+          model,
+        ),
+      ];
+      m.classifyStartedAt = at - age;
+      m.classifyFinishedAt = at - age + duration;
+      f.db
+        .prepare(
+          "INSERT INTO delegations (id,session_id,status,requested_at,metrics_json) VALUES (?,?,'completed',?,?)",
+        )
+        .run(id, session.id, at - age, instrumented ? JSON.stringify(m) : null);
+    };
+    add("terra", 300, "gpt-5.6-terra", 900);
+    add("jev", 200, "jev", 50);
+    add("old-schema", 100, "jev", 40, false);
+    let status = await statusOf(f, [
+      "status",
+      "--session",
+      session.id,
+      "--last",
+      "3",
+    ]);
+    assert.equal(status.sessions[0].latency.sampled, 3);
+    assert.equal(status.sessions[0].latency.instrumented, 2);
+    assert.deepEqual(
+      status.sessions[0].latency.byModel.map((g: any) => [
+        g.answeredBy,
+        g.stagesMs.classify.p50,
+      ]),
+      [
+        ["jev", 50],
+        ["terra", 900],
+      ],
+    );
+    status = await statusOf(f, ["status", "--last", "1"]);
+    assert.equal(status.sessions[0].latency.instrumented, 0);
+    for (const args of [
+      ["status", "--last", "0"],
+      ["status", "--last", "1001"],
+      ["status", "--last", "1.5"],
+      ["status", "--session"],
+      ["status", "--bogus", "x"],
+    ]) {
+      assert.equal((await f.harness.behavior.runCli(args)).exitCode, 1);
+    }
+    add("expired", 91 * 86400000, "terra", 1);
+    await f.harness.behavior.runSchedule("retention");
+    assert.equal(
+      f.db.prepare("SELECT id FROM delegations WHERE id='expired'").get(),
+      undefined,
+    );
+    assert.equal((await statusOf(f)).sessions[0].latency.instrumented, 2);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("serialization wait stays outside classify; cancellation leaves unstarted stages unknown", async () => {
+  const f = await fixture();
+  try {
+    const session = await f.start();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.setClassify(async () => {
+      await gate;
+      return {
+        action: "capabilities",
+        target: null,
+        message: "",
+        uncertain: false,
+      };
+    });
+    const event = (id: string) =>
+      f.onEvent({
+        type: "session.delegation.created",
+        offset_ms: 100,
+        delegation: { id, target: "client" },
+      });
+    event("first");
+    await new Promise((r) => setTimeout(r, 10));
+    event("second");
+    assert.equal(latencyOf(f, "second").classifyStartedAt, null);
+    assert.equal(latencyOf(f, "second").speechEndOffsetMs, null);
+    await f.call("control", {
+      id: session.id,
+      token: session.token,
+      command: "end",
+    });
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(latencyOf(f, "first").classifyFinishedAt);
+    assert.equal(latencyOf(f, "first").dispatchStartedAt, null);
+    assert.equal(latencyOf(f, "second").classifyStartedAt, null);
+    assert.equal((await statusOf(f)).sessions[0].latency.outcomes.cancelled, 2);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("missing transcript timestamps never manufacture a speech baseline", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    f.onEvent({
+      type: "session.input_transcript.delta",
+      delta: "No timestamp",
+    });
+    f.onEvent({
+      type: "session.delegation.created",
+      offset_ms: 100,
+      delegation: { id: "d1", target: "client" },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(latencyOf(f).speechEndOffsetMs, null);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("a successful serialized request reports queue wait separately from classify", async () => {
+  const f = await fixture();
+  try {
+    await f.start();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    f.setClassify(async () => {
+      if (++calls === 1) await gate;
+      return {
+        action: "capabilities",
+        target: null,
+        message: "",
+        uncertain: false,
+      };
+    });
+    const event = (id: string) =>
+      f.onEvent({
+        type: "session.delegation.created",
+        offset_ms: 100,
+        delegation: { id, target: "client" },
+      });
+    event("first");
+    event("second");
+    await new Promise((r) => setTimeout(r, 25));
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    const m = latencyOf(f, "second");
+    assert.ok(m.classifyStartedAt - m.eventReceivedAt >= 20);
+    assert.ok(m.classifyStartedAt >= latencyOf(f, "first").dispatchFinishedAt);
+    assert.ok(m.classifyFinishedAt >= m.classifyStartedAt);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("additive migration preserves pre-instrumentation operational rows", async () => {
+  const f = await fixture(0, true);
+  try {
+    const status = await statusOf(f, ["status", "--session", "legacy"]);
+    assert.equal(status.sessions[0].latency.sampled, 1);
+    assert.equal(status.sessions[0].latency.instrumented, 0);
+    assert.deepEqual(status.sessions[0].latency.stagesMs.classify, {
+      n: 0,
+      p50: null,
+      p95: null,
+    });
+    assert.equal(latencyOf(f, "legacy-request"), null);
+  } finally {
+    await f.harness.lifecycle.dispose();
+  }
+});
+
+test("classifier telemetry stays bounded and never totals a truncated set of reports", async () => {
+  const f = await fixture(0);
+  try {
+    await f.start();
+    f.setClassify(async (_key, model, _context, _signal, report) => {
+      for (let i = 0; i < 6; i++)
+        report?.(
+          classifyUsage(
+            { model, usage: { input_tokens: 100, cost_usd: 0.01 } },
+            model,
+          ),
+        );
+      return {
+        action: "capabilities",
+        message: "",
+        target: null,
+        uncertain: false,
+      };
+    });
+    await f.event({
+      action: "capabilities",
+      message: "",
+      target: null,
+      uncertain: false,
+    });
+    assert.equal(latencyOf(f).classifiers.length, 4);
+    assert.equal(latencyOf(f).classifyReportsDropped, 2);
+    const summary = (await statusOf(f)).sessions[0].latency;
+    assert.equal(summary.classifyReportsDropped, 2);
+    assert.equal(summary.classifyUsage.reportedCostUsd.total, null);
+    assert.equal(summary.classifyUsage.inputTokens.n, 0);
   } finally {
     await f.harness.lifecycle.dispose();
   }
